@@ -11,30 +11,29 @@ except ImportError:
 
 
 @dataclass
-class PIDGains:
+class PDGains:
     kp: float
-    ki: float = 0.0
     kd: float = 0.0
 
 
-class JointSpacePIDController:
+class JointSpacePDController:
     """
-    Per-joint PID controller with optional feed-forward velocity.
+    Per-joint PD controller with direct gravity compensation and torque saturation.
     """
 
     def __init__(
         self,
-        gains: Sequence[PIDGains],
+        gains: Sequence[PDGains],
         dyn: SimpleDynamics4DOF,
+        tau_limit: float = 50.0,
     ) -> None:
         if len(gains) != dyn.arm.dof:
             raise ValueError("Number of gain sets must equal arm DOF.")
+        if tau_limit <= 0.0:
+            raise ValueError("tau_limit must be positive.")
         self.gains = gains
         self.dyn = dyn
-        self.integral_error = np.zeros(dyn.arm.dof, dtype=float)
-
-    def reset(self) -> None:
-        self.integral_error[:] = 0.0
+        self.tau_limit = float(tau_limit)
 
     def compute_torque(
         self,
@@ -42,7 +41,6 @@ class JointSpacePIDController:
         q_dot: Sequence[float],
         q_ref: Sequence[float],
         q_dot_ref: Sequence[float] | None = None,
-        dt: float = 0.01,
     ) -> np.ndarray:
         """
         Compute joint torques for tracking reference trajectories.
@@ -57,21 +55,17 @@ class JointSpacePIDController:
 
         error = q_ref - q
         d_error = q_dot_ref - q_dot
-        self.integral_error += error * dt
+        tau_cmd = self.dyn.gravity_torque(q).astype(float, copy=True)
 
-        tau = np.zeros_like(q)
         for i, g in enumerate(self.gains):
-            tau[i] = (
-                g.kp * error[i]
-                + g.ki * self.integral_error[i]
-                + g.kd * d_error[i]
-            )
-        return tau
+            tau_cmd[i] += g.kp * error[i] + g.kd * d_error[i]
+
+        return np.clip(tau_cmd, -self.tau_limit, self.tau_limit)
 
 
 def simulate_joint_step_response(
     dyn: SimpleDynamics4DOF,
-    controller: JointSpacePIDController,
+    controller: JointSpacePDController,
     q_init: Sequence[float],
     qdot_init: Sequence[float],
     q_ref: Sequence[float],
@@ -103,15 +97,12 @@ def simulate_joint_step_response(
     qs[0] = q
     qdots[0] = q_dot
 
-    controller.reset()
-
     for k in range(steps):
         tau = controller.compute_torque(
             q=q,
             q_dot=q_dot,
             q_ref=q_ref_arr,
             q_dot_ref=np.zeros_like(q),
-            dt=dt,
         )
         q, q_dot = dyn.step(q, q_dot, tau, dt)
         qs[k + 1] = q
@@ -132,12 +123,12 @@ def main() -> None:
     arm = Arm4DOFDH()
     dyn = SimpleDynamics4DOF(arm)
     gains = [
-        PIDGains(kp=5.0, ki=0.0, kd=1.0),
-        PIDGains(kp=4.0, ki=0.0, kd=0.8),
-        PIDGains(kp=3.0, ki=0.0, kd=0.6),
-        PIDGains(kp=2.0, ki=0.0, kd=0.5),
+        PDGains(kp=5.0, kd=1.0),
+        PDGains(kp=4.0, kd=0.8),
+        PDGains(kp=3.0, kd=0.6),
+        PDGains(kp=2.0, kd=0.5),
     ]
-    controller = JointSpacePIDController(gains, dyn)
+    controller = JointSpacePDController(gains, dyn)
 
     q_init = np.zeros(4)
     qdot_init = np.zeros(4)

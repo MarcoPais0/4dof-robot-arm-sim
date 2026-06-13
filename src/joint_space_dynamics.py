@@ -1,5 +1,4 @@
 import numpy as np
-from dataclasses import dataclass
 from typing import Sequence, Tuple
 
 try:
@@ -10,28 +9,14 @@ except ImportError:
     from forward_kinematics import Arm4DOFDH
 
 
-@dataclass
-class JointInertia:
-    """
-    Simple per-joint inertia and damping model.
-
-    The full dynamics are approximated as:
-        M * q_ddot + D * q_dot + g(q) = tau
-    where M and D are diagonal.
-    """
-
-    inertia: float
-    damping: float
-
-
 class SimpleDynamics4DOF:
     """
     Minimal joint-space dynamics for the 4DOF arm.
 
     Assumptions:
     - Diagonal inertia and damping matrices.
-    - Gravity torque remains a simple placeholder based on projected link
-      lengths rather than a spatially faithful Topic 6 rigid-body model.
+    - Gravity torque uses a lightweight projected-link model that is the
+      intended final v1 behavior for this project.
     """
 
     def __init__(
@@ -74,11 +59,12 @@ class SimpleDynamics4DOF:
 
     def gravity_torque(self, q: Sequence[float]) -> np.ndarray:
         """
-        Very simple placeholder gravity torque approximation.
+        Lightweight gravity torque approximation based on projected link
+        lengths.
 
-        This heuristic remains intentionally simple during the geometry
-        upgrade. It is not yet a physically faithful spatial gravity model
-        for the Topic 2 arm geometry.
+        This is the final gravity model for the current version of the
+        project. It intentionally trades physical fidelity for a compact and
+        stable educational implementation.
         """
         n = self.arm.dof
         if len(q) != n:
@@ -92,16 +78,10 @@ class SimpleDynamics4DOF:
 
         # For each link, approximate a projected CoM contribution.
         for i in range(n):
-            theta_com = np.sum(q[: i + 1])
             r_com = 0.5 * lengths[i]
-            # Keep the same lightweight projected potential model for now.
-            y_com = r_com * np.sin(theta_com)
-            # Potential energy contribution U_i = m_i * g * y_com.
-            # Torque about joint j is approximated from that scalar model.
-            for j in range(i + 1):
-                torques[j] += self.masses[i] * g * r_com * np.cos(
-                    np.sum(q[: i + 1])
-                )
+            theta_com = float(np.sum(q[: i + 1]))
+            contribution = self.masses[i] * g * r_com * np.cos(theta_com)
+            torques[: i + 1] += contribution
 
         return torques
 

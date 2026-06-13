@@ -29,19 +29,56 @@ def damped_pseudo_inverse(J: np.ndarray, lam: float = 1e-3) -> np.ndarray:
         Damped pseudo-inverse of J.
     """
     m, n = J.shape
+    if lam <= 0.0:
+        raise ValueError("lam must be positive.")
     if m >= n:
-        return np.linalg.inv(J.T @ J + (lam ** 2) * np.eye(n)) @ J.T
-    return J.T @ np.linalg.inv(J @ J.T + (lam ** 2) * np.eye(m))
+        lhs = J.T @ J + (lam**2) * np.eye(n)
+        return np.linalg.solve(lhs, J.T)
+    lhs = J @ J.T + (lam**2) * np.eye(m)
+    return J.T @ np.linalg.solve(lhs, np.eye(m))
+
+
+def saturate_norm(vector: Sequence[float], max_norm: float) -> np.ndarray:
+    """
+    Scale a vector so its Euclidean norm does not exceed ``max_norm``.
+    """
+    if max_norm <= 0.0:
+        raise ValueError("max_norm must be positive.")
+
+    v = np.asarray(vector, dtype=float)
+    norm = float(np.linalg.norm(v))
+    if norm <= max_norm or norm == 0.0:
+        return v
+    return v * (max_norm / norm)
+
+
+def adaptive_damping(
+    sigma_min_value: float,
+    lambda_0: float = 1e-2,
+    k_lambda: float = 3e-3,
+    epsilon: float = 1e-3,
+) -> float:
+    """
+    Compute the singularity-aware damping term used by the resolved-rate loop.
+    """
+    if lambda_0 <= 0.0:
+        raise ValueError("lambda_0 must be positive.")
+    if k_lambda < 0.0:
+        raise ValueError("k_lambda must be non-negative.")
+    if epsilon <= 0.0:
+        raise ValueError("epsilon must be positive.")
+
+    return float(lambda_0 + k_lambda / (sigma_min_value + epsilon))
 
 
 def inverse_differential_kinematics(
     arm: Arm4DOFDH,
     q: Sequence[float],
-    xdot_desired: np.ndarray,
+    v_desired: np.ndarray,
     lam: float = 1e-3,
 ) -> np.ndarray:
     """
-    Compute joint velocities from a desired end-effector spatial velocity.
+    Compute joint velocities from a desired end-effector linear velocity.
 
     Parameters
     ----------
@@ -49,8 +86,8 @@ def inverse_differential_kinematics(
         Arm model.
     q : array_like, shape (4,)
         Current joint configuration.
-    xdot_desired : ndarray, shape (6,)
-        Desired spatial velocity [v; w] of the end-effector.
+    v_desired : ndarray, shape (3,)
+        Desired tool-origin linear velocity in the base frame.
     lam : float
         Damping factor for the pseudo-inverse.
 
@@ -60,9 +97,13 @@ def inverse_differential_kinematics(
         Joint velocities realizing the desired spatial velocity in the
         least-squares sense.
     """
-    J = geometric_jacobian(arm, q)
-    J_pinv = damped_pseudo_inverse(J, lam=lam)
-    return J_pinv @ xdot_desired
+    v_desired = np.asarray(v_desired, dtype=float)
+    if v_desired.shape != (3,):
+        raise ValueError(f"Expected a 3-vector for v_desired, got shape {v_desired.shape}.")
+
+    J_v = geometric_jacobian(arm, q)[0:3, :]
+    J_pinv = damped_pseudo_inverse(J_v, lam=lam)
+    return J_pinv @ v_desired
 
 
 def main() -> None:
@@ -71,8 +112,8 @@ def main() -> None:
     """
     arm = Arm4DOFDH()
     q = np.deg2rad([30.0, 20.0, -15.0, 40.0])
-    xdot_desired = np.array([0.1, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
-    qdot = inverse_differential_kinematics(arm, q, xdot_desired)
+    v_desired = np.array([0.1, 0.0, 0.0], dtype=float)
+    qdot = inverse_differential_kinematics(arm, q, v_desired)
     np.set_printoptions(precision=3, suppress=True)
     print("qdot:")
     print(qdot)
