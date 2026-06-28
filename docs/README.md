@@ -19,5 +19,5 @@ This folder contains the technical documentation for the project. The material i
 - [`jacobian-ik.md`](jacobian-ik.md): geometric Jacobian, singularity analysis, and inverse differential kinematics
 - [`dynamics-control.md`](dynamics-control.md): simplified dynamics, joint-space control, and numerical integration
 - [`demos.md`](demos.md): demo behavior, runtime flow, and expected outputs
-- [`environment.md`](environment.md): supported Python versions, venv setup, and startup checks
+- [`environment.md`](environment.md): venv setup and startup checks
 - [`assumptions-limitations.md`](assumptions-limitations.md): simplifications, tradeoffs, and non-modeled behavior

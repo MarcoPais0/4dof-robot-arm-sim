@@ -26,13 +26,14 @@ Default parameters:
 a_i = [0, 0, 0, 0, 0, 0, 0]
 alpha_i = [-pi/2, pi/2, pi/2, -pi/2, -pi/2, pi/2, 0]
 d_i = [0.34, 0, 0.40, 0, 0.40, 0, 0.126]
+theta_offset_i = [0.0, -pi/2, pi/2, -pi/2, 0.0, pi/2, 0.0]
 theta_i = q_i + theta_offset_i
 ```
 
 The tool transform is:
 
 ```text
-T_7^tool = I by default, with an optional z-aligned tool offset if needed
+T_7^tool = translation along +z7 by default, with a short visible tool extension
 ```
 
 ## Forward Kinematics
@@ -52,5 +53,7 @@ The tool origin stays fixed under changes to the terminal wrist roll angle when 
 
 - FK returns full homogeneous transforms.
 - Point extraction remains part of FK so visualization does not need a separate geometry layer.
-- The chosen DH table is intentionally non-degenerate so the spatial structure is easy to analyze.
-- The dashboard renders the seven joint origins as visible markers and a `7 DOF` badge, but some adjacent spans can still overlap because several DH translations are zero.
+- The chosen DH table now uses iiwa 14 R820-inspired proportions with zero lateral offsets, so the home pose contains a few coincident FK origins and the visible spans come from the axial `d_i` values.
+- `DEFAULT_SEGMENT_LENGTHS` is derived from the home pose, which keeps the simplified gravity model aligned with the refreshed FK chain.
+- The dashboard renders the seven joint origins as visible markers, a `7 DOF` badge, and the explicit tool point so the arm path matches the FK chain.
+- The task-space controller uses a 5D primary task: three position rows plus two rows that keep the tool z-axis aligned with world down, while leaving roll about the tool axis free.

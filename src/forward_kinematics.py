@@ -74,7 +74,9 @@ def dh_transform(a: float, alpha: float, d: float, theta: float) -> np.ndarray:
 
 class Arm7DOFDH:
     """
-    Spatial 7DOF revolute manipulator defined by a compact industrial-arm DH model.
+    Spatial 7DOF revolute manipulator defined by a compact industrial-style DH model.
+    The default proportions are inspired by the KUKA LBR iiwa 14 R820 and use
+    a zero-lateral-offset iiwa-like chain.
 
     This is the authoritative geometry definition for:
     - frames {0} through {7}, and {tool}
@@ -89,13 +91,14 @@ class Arm7DOFDH:
         a_i     = [0, 0, 0, 0, 0, 0, 0]
         alpha_i = [-pi/2, pi/2, pi/2, -pi/2, -pi/2, pi/2, 0]
         d_i     = [0.34, 0.0, 0.40, 0.0, 0.40, 0.0, 0.126]
+        theta_offset_i = [0.0, -pi/2, pi/2, -pi/2, 0.0, pi/2, 0.0]
         theta_i = q_i + theta_offset_i
 
-    The default tool transform keeps the tool frame aligned with z7 and
-    coincident with the final joint frame unless an additional tool offset is
-    provided explicitly.
+    The default tool transform keeps the tool frame aligned with z7 and adds a
+    short tool extension so the rendered arm shows a visible end effector.
     """
 
+    MODEL_VARIANT = "KUKA LBR iiwa 14 R820-inspired"
     BASE_FRAME = "0"
     JOINT_FRAMES = ("1", "2", "3", "4", "5", "6", "7")
     TOOL_FRAME = "tool"
@@ -103,7 +106,9 @@ class Arm7DOFDH:
     DEFAULT_A = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     DEFAULT_ALPHA = (-np.pi / 2.0, np.pi / 2.0, np.pi / 2.0, -np.pi / 2.0, -np.pi / 2.0, np.pi / 2.0, 0.0)
     DEFAULT_D = (0.34, 0.0, 0.40, 0.0, 0.40, 0.0, 0.126)
-    DEFAULT_SEGMENT_LENGTHS = (0.34, 0.40, 0.40, 0.126, 0.126, 0.10, 0.08)
+    DEFAULT_THETA_OFFSETS = (0.0, -np.pi / 2.0, np.pi / 2.0, -np.pi / 2.0, 0.0, np.pi / 2.0, 0.0)
+    DEFAULT_TOOL_OFFSET = 0.16
+    DEFAULT_SEGMENT_LENGTHS = (0.34, 0.0, 0.40, 0.0, 0.40, 0.0, 0.126)
 
     def __init__(
         self,
@@ -111,7 +116,7 @@ class Arm7DOFDH:
         T_7_tool: np.ndarray | None = None,
     ) -> None:
         if theta_offsets is None:
-            theta_offsets = (0.0,) * 7
+            theta_offsets = self.DEFAULT_THETA_OFFSETS
         if len(theta_offsets) != 7:
             raise ValueError("theta_offsets must contain exactly seven values.")
 
@@ -131,10 +136,9 @@ class Arm7DOFDH:
                 strict=True,
             )
         ]
-        self.segment_lengths = np.asarray(self.DEFAULT_SEGMENT_LENGTHS, dtype=float)
-
         if T_7_tool is None:
             T_7_tool = np.eye(4, dtype=float)
+            T_7_tool[2, 3] = self.DEFAULT_TOOL_OFFSET
 
         self.T_7_tool = np.asarray(T_7_tool, dtype=float).copy()
         if self.T_7_tool.shape != (4, 4):
@@ -156,6 +160,12 @@ class Arm7DOFDH:
         if tool_offset[2] < 0.0:
             raise ValueError("T_7_tool translation must be non-negative along z7.")
 
+        home_state = self.frame_state(np.zeros(self.dof, dtype=float))
+        self.segment_lengths = np.linalg.norm(np.diff(home_state.joint_points, axis=0), axis=1)
+        joint_distances = np.linalg.norm(home_state.joint_points, axis=1)
+        tool_distance = float(np.linalg.norm(home_state.tool_point))
+        self._reach = 0.97 * float(max(np.max(joint_distances), tool_distance))
+
     @property
     def dof(self) -> int:
         return len(self.links)
@@ -165,7 +175,7 @@ class Arm7DOFDH:
         """
         Compact scalar reach estimate used by the demo for workspace scaling.
         """
-        return float(np.sum(self.DEFAULT_D[::2]))
+        return float(self._reach)
 
     def frame_state(self, q: Sequence[float]) -> ArmFrameState:
         """

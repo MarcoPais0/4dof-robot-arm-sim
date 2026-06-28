@@ -25,7 +25,7 @@ tau = sat(tau_cmd, -tau_limit, tau_limit)
 
 The gravity term is included directly in the controller so it approximately cancels the gravity term in the dynamics. The default torque limit is `tau_limit = 50 N m` per joint.
 
-For the 7DOF arm, the gravity approximation uses a lightweight segment-length profile rather than a full rigid-body model, which keeps the demo stable without introducing a much heavier dynamics stack.
+For the 7DOF arm, the gravity approximation uses a lightweight segment-length profile derived from the refreshed home pose rather than a full rigid-body model, which keeps the demo stable without introducing a much heavier dynamics stack.
 
 ## Numerical Integration
 

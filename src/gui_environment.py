@@ -2,21 +2,10 @@ from __future__ import annotations
 
 import importlib
 import os
+import ctypes
 import sys
 from pathlib import Path
 from typing import Iterable
-
-SUPPORTED_PYTHON_VERSIONS: tuple[tuple[int, int], ...] = ((3, 12), (3, 13))
-
-
-def _format_version(version: tuple[int, int]) -> str:
-    return f"{version[0]}.{version[1]}"
-
-
-def _supported_python_message() -> str:
-    versions = ", ".join(_format_version(version) for version in SUPPORTED_PYTHON_VERSIONS)
-    current = _format_version(sys.version_info[:2])
-    return f"Python {current} is not supported for this app. Use Python 3.13, or 3.12 if 3.13 is unavailable. Supported versions: {versions}."
 
 
 def _import_or_message(module_name: str, label: str | None = None) -> str | None:
@@ -26,6 +15,28 @@ def _import_or_message(module_name: str, label: str | None = None) -> str | None
         name = label or module_name
         return f"{name} import failed: {exc}"
     return None
+
+
+def _has_active_macos_console_session() -> bool:
+    """
+    Return True when the current process appears to be attached to a macOS
+    console session.
+
+    Qt's Cocoa platform plugin aborts early when launched from a detached shell
+    without a live desktop session, so we probe the CoreGraphics session state
+    before constructing QApplication.
+    """
+    if sys.platform != "darwin":
+        return True
+
+    try:
+        coregraphics = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    except OSError:
+        return True
+
+    coregraphics.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
+    session = coregraphics.CGSessionCopyCurrentDictionary()
+    return bool(session)
 
 
 def qt_plugin_paths() -> tuple[Path, Path]:
@@ -50,8 +61,11 @@ def configure_qt_plugin_paths() -> tuple[Path, Path]:
 def collect_runtime_issues() -> list[str]:
     issues: list[str] = []
 
-    if sys.version_info[:2] not in SUPPORTED_PYTHON_VERSIONS:
-        issues.append(_supported_python_message())
+    if sys.platform == "darwin" and not _has_active_macos_console_session():
+        issues.append(
+            "No active macOS desktop session was detected. Launch the app from an interactive "
+            "desktop terminal, not a detached shell."
+        )
 
     pyside6_ok = True
     for module_name, label in (

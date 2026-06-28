@@ -11,14 +11,30 @@ import numpy as np
 
 try:
     from .forward_kinematics import Arm7DOFDH
-    from .geometric_jacobian import analyze_position_jacobian
-    from .inverse_differential_kinematics import adaptive_damping, inverse_differential_kinematics, saturate_norm
+    from .inverse_differential_kinematics import (
+        adaptive_damping,
+        analyze_self_collision,
+        analyze_task_jacobian,
+        default_link_collision_radius,
+        default_link_visual_radius,
+        inverse_differential_kinematics,
+        saturate_norm,
+        tool_axis_misalignment,
+    )
     from .joint_space_controller import JointSpacePDController, PDGains
     from .joint_space_dynamics import SimpleDynamics7DOF
 except ImportError:
     from forward_kinematics import Arm7DOFDH
-    from geometric_jacobian import analyze_position_jacobian
-    from inverse_differential_kinematics import adaptive_damping, inverse_differential_kinematics, saturate_norm
+    from inverse_differential_kinematics import (
+        adaptive_damping,
+        analyze_self_collision,
+        analyze_task_jacobian,
+        default_link_collision_radius,
+        default_link_visual_radius,
+        inverse_differential_kinematics,
+        saturate_norm,
+        tool_axis_misalignment,
+    )
     from joint_space_controller import JointSpacePDController, PDGains
     from joint_space_dynamics import SimpleDynamics7DOF
 
@@ -68,10 +84,83 @@ class MetricSpec:
     color: str
 
 
+SIMULATION_JOINT_COUNT = 7
+SIMULATION_LINK_SEGMENT_LABELS = (
+    "B-J1",
+    "J1-J2",
+    "J2-J3",
+    "J3-J4",
+    "J4-J5",
+    "J5-J6",
+    "J6-J7",
+    "J7-tool",
+)
+SIMULATION_LINK_SEGMENT_ENDPOINTS = (
+    ("base", "J1"),
+    ("J1", "J2"),
+    ("J2", "J3"),
+    ("J3", "J4"),
+    ("J4", "J5"),
+    ("J5", "J6"),
+    ("J6", "J7"),
+    ("J7", "tool"),
+)
+JOINT_MARKER_DEFAULT_COLOR = (0.96, 0.8, 0.2, 1.0)
+JOINT_MARKER_HIGHLIGHT_COLOR = (1.0, 0.63, 0.15, 1.0)
+TOOL_MARKER_DEFAULT_COLOR = (0.95, 0.95, 0.97, 1.0)
+LINK_SEGMENT_DEFAULT_COLOR = (0.84, 0.86, 0.90, 1.0)
+TOOL_SEGMENT_DEFAULT_COLOR = (0.92, 0.93, 0.96, 1.0)
+LINK_SEGMENT_HIGHLIGHT_COLOR = (0.39, 0.82, 1.0, 1.0)
+
+
+@dataclass(frozen=True)
+class SelectionHighlightState:
+    joint_marker_index: int | None
+    joint_segment_index: int | None
+    link_marker_index: int | None
+    link_segment_index: int | None
+
+
+def selection_highlight_state(
+    selected_joint_index: int | None,
+    selected_link_index: int | None,
+    joint_count: int = SIMULATION_JOINT_COUNT,
+    link_count: int = len(SIMULATION_LINK_SEGMENT_LABELS),
+) -> SelectionHighlightState:
+    if joint_count <= 0:
+        raise ValueError("joint_count must be positive.")
+    if link_count <= 0:
+        raise ValueError("link_count must be positive.")
+
+    joint_marker_index: int | None = None
+    joint_segment_index: int | None = None
+    if selected_joint_index is not None:
+        if not 1 <= int(selected_joint_index) <= joint_count:
+            raise ValueError(f"selected_joint_index must be between 1 and {joint_count}.")
+        joint_marker_index = int(selected_joint_index) - 1
+        joint_segment_index = joint_marker_index
+
+    link_marker_index: int | None = None
+    link_segment_index: int | None = None
+    if selected_link_index is not None:
+        if not 1 <= int(selected_link_index) <= link_count:
+            raise ValueError(f"selected_link_index must be between 1 and {link_count}.")
+        link_segment_index = int(selected_link_index) - 1
+        link_marker_index = joint_count if int(selected_link_index) == link_count else link_segment_index
+
+    return SelectionHighlightState(
+        joint_marker_index=joint_marker_index,
+        joint_segment_index=joint_segment_index,
+        link_marker_index=link_marker_index,
+        link_segment_index=link_segment_index,
+    )
+
+
 @dataclass
 class DemoSnapshot:
     time: float
     arm_points: np.ndarray
+    tool_point: np.ndarray
     trace_points: np.ndarray
     inactive_targets: np.ndarray | None
     active_target: np.ndarray | None
@@ -81,12 +170,38 @@ class DemoSnapshot:
     joint_torques: np.ndarray
     joint_powers: np.ndarray
     metrics: dict[str, float]
+    telemetry: dict[str, float]
 
 
 def _default_pd_gains(dof: int) -> list[PDGains]:
     kp_values = np.linspace(5.5, 2.0, dof)
     kd_values = np.linspace(1.1, 0.4, dof)
     return [PDGains(kp=float(kp), kd=float(kd)) for kp, kd in zip(kp_values, kd_values, strict=True)]
+
+
+def cartesian_target_should_advance(
+    position_error_norm: float,
+    axis_misalignment: float,
+    position_tolerance: float,
+    axis_tolerance: float,
+    target_steps: int,
+    max_steps: int,
+) -> bool:
+    return (
+        position_error_norm <= position_tolerance
+        and axis_misalignment <= axis_tolerance
+    ) or target_steps >= max_steps
+
+
+def _collision_telemetry(arm: Arm7DOFDH, q: np.ndarray, collision_radius: float) -> dict[str, float]:
+    collision_analysis = analyze_self_collision(arm, q, collision_radius=collision_radius)
+    return {
+        "min_self_collision_distance": float(collision_analysis.min_distance),
+        "self_collision_safe_distance": float(collision_analysis.safe_distance),
+        "self_collision_penalty": float(collision_analysis.total_penalty),
+        "self_collision_active": 1.0 if collision_analysis.has_active_pair else 0.0,
+        "self_collision_active_pair_count": float(collision_analysis.active_pair_count),
+    }
 
 
 class BaseDemoSession:
@@ -170,8 +285,8 @@ class CartesianTrackingSession(BaseDemoSession):
         MetricSpec(
             "min_singular_value",
             "Minimum singular value",
-            "Smallest singular value of the position Jacobian at the current configuration.",
-            "How close the arm is to a singular pose.",
+            "Smallest singular value of the 5D task Jacobian at the current configuration.",
+            "How close the combined task is to a singular pose.",
             ACCENT_ORANGE,
         ),
     )
@@ -183,7 +298,9 @@ class CartesianTrackingSession(BaseDemoSession):
         self.cartesian_lambda_0 = 1e-2
         self.cartesian_lambda_gain = 3e-3
         self.cartesian_lambda_epsilon = 1e-3
+        self.collision_radius = default_link_collision_radius(self.arm)
         self.cartesian_target_tolerance = 0.01
+        self.cartesian_axis_tolerance = 0.10
         self.cartesian_target_max_steps = 490
         self.cartesian_target_count = 15
         self.cartesian_target_seed = 7
@@ -230,10 +347,13 @@ class CartesianTrackingSession(BaseDemoSession):
 
     def snapshot(self) -> DemoSnapshot:
         state = self._current_arm_state()
+        task_analysis = analyze_task_jacobian(self.arm, self.q)
+        axis_misalignment = tool_axis_misalignment(self.arm, self.q)
         inactive_targets = np.delete(self.targets, self.active_index, axis=0) if len(self.targets) else None
         return DemoSnapshot(
             time=self.time,
             arm_points=state.joint_points,
+            tool_point=state.tool_point,
             trace_points=self.trace_points,
             inactive_targets=inactive_targets,
             active_target=self.current_target,
@@ -246,7 +366,13 @@ class CartesianTrackingSession(BaseDemoSession):
                 "position_error_norm": 0.0,
                 "commanded_speed_norm": 0.0,
                 "joint_speed_norm": 0.0,
-                "min_singular_value": 0.0,
+                "min_singular_value": float(task_analysis.min_singular_value),
+            },
+            telemetry={
+                "tool_axis_misalignment": float(axis_misalignment),
+                "tool_axis_down_alignment": float(np.cos(axis_misalignment)),
+                "task_min_singular_value": float(task_analysis.min_singular_value),
+                **_collision_telemetry(self.arm, self.q, self.collision_radius),
             },
         )
 
@@ -255,13 +381,14 @@ class CartesianTrackingSession(BaseDemoSession):
         tool_point = state.tool_point
         position_error = self.current_target - tool_point
         error_norm = float(np.linalg.norm(position_error))
+        axis_misalignment = tool_axis_misalignment(self.arm, self.q)
 
         v_des_raw = self.cartesian_position_gain * position_error
         v_des = saturate_norm(v_des_raw, self.cartesian_velocity_limit)
 
-        analysis = analyze_position_jacobian(self.arm, self.q)
+        task_analysis = analyze_task_jacobian(self.arm, self.q)
         lam = adaptive_damping(
-            analysis.min_singular_value,
+            task_analysis.min_singular_value,
             lambda_0=self.cartesian_lambda_0,
             k_lambda=self.cartesian_lambda_gain,
             epsilon=self.cartesian_lambda_epsilon,
@@ -271,6 +398,7 @@ class CartesianTrackingSession(BaseDemoSession):
             q=self.q,
             v_desired=v_des,
             lam=lam,
+            collision_radius=self.collision_radius,
         )
         q_ref = self.q + dt * q_dot_cmd
         tau = self.controller.compute_torque(
@@ -287,15 +415,24 @@ class CartesianTrackingSession(BaseDemoSession):
 
         self.blink_phase = (self.blink_phase + dt) % self.blink_period
         self.target_steps += 1
-        if error_norm <= self.cartesian_target_tolerance or self.target_steps >= self.cartesian_target_max_steps:
+        if cartesian_target_should_advance(
+            position_error_norm=error_norm,
+            axis_misalignment=axis_misalignment,
+            position_tolerance=self.cartesian_target_tolerance,
+            axis_tolerance=self.cartesian_axis_tolerance,
+            target_steps=self.target_steps,
+            max_steps=self.cartesian_target_max_steps,
+        ):
             self._advance_target()
 
         self.current_tau = tau.copy()
         self.current_power = self.current_tau * self.q_dot
         inactive_targets = np.delete(self.targets, self.active_index, axis=0) if len(self.targets) else None
+        collision_telemetry = _collision_telemetry(self.arm, self.q, self.collision_radius)
         return DemoSnapshot(
             time=self.time,
             arm_points=new_state.joint_points,
+            tool_point=new_state.tool_point,
             trace_points=self.trace_points,
             inactive_targets=inactive_targets,
             active_target=self.current_target,
@@ -308,7 +445,13 @@ class CartesianTrackingSession(BaseDemoSession):
                 "position_error_norm": error_norm,
                 "commanded_speed_norm": float(np.linalg.norm(v_des)),
                 "joint_speed_norm": float(np.linalg.norm(self.q_dot)),
-                "min_singular_value": float(analysis.min_singular_value),
+                "min_singular_value": float(task_analysis.min_singular_value),
+            },
+            telemetry={
+                "tool_axis_misalignment": float(axis_misalignment),
+                "tool_axis_down_alignment": float(np.cos(axis_misalignment)),
+                "task_min_singular_value": float(task_analysis.min_singular_value),
+                **collision_telemetry,
             },
         )
 
@@ -372,6 +515,7 @@ class JointStepSession(BaseDemoSession):
         return DemoSnapshot(
             time=self.time,
             arm_points=state.joint_points,
+            tool_point=state.tool_point,
             trace_points=self.trace_points,
             inactive_targets=None,
             active_target=None,
@@ -386,6 +530,7 @@ class JointStepSession(BaseDemoSession):
                 "velocity_error_norm": 0.0,
                 "max_error": 0.0,
             },
+            telemetry={},
         )
 
     def step(self, dt: float) -> DemoSnapshot:
@@ -406,6 +551,7 @@ class JointStepSession(BaseDemoSession):
         return DemoSnapshot(
             time=self.time,
             arm_points=state.joint_points,
+            tool_point=state.tool_point,
             trace_points=self.trace_points,
             inactive_targets=None,
             active_target=None,
@@ -420,6 +566,7 @@ class JointStepSession(BaseDemoSession):
                 "velocity_error_norm": float(np.linalg.norm(-self.q_dot)),
                 "max_error": float(np.max(np.abs(position_error))),
             },
+            telemetry={},
         )
 
 
@@ -450,18 +597,18 @@ if _QT_AVAILABLE:
             self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
 
 
-    class JointSelectorChip(QtWidgets.QLabel):
+    class SelectionChip(QtWidgets.QLabel):
         clicked = QtCore.Signal(int)
 
-        def __init__(self, joint_index: int, text: str) -> None:
+        def __init__(self, selection_index: int, text: str) -> None:
             super().__init__(text)
-            self.joint_index = joint_index
+            self.selection_index = selection_index
             self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
             self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
 
         def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
             if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                self.clicked.emit(self.joint_index)
+                self.clicked.emit(self.selection_index)
             super().mousePressEvent(event)
 
 
@@ -729,13 +876,23 @@ if _QT_AVAILABLE:
 
 
     class SimulationCard(QtWidgets.QFrame):
-        def __init__(self, arm: Arm7DOFDH, on_joint_selected: Callable[[int], None]) -> None:
+        def __init__(
+            self,
+            arm: Arm7DOFDH,
+            on_joint_selected: Callable[[int], None],
+            on_link_selected: Callable[[int], None],
+        ) -> None:
             super().__init__()
             self.setObjectName("SimulationCard")
             self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
             self.arm = arm
             self._on_joint_selected = on_joint_selected
-            self._joint_chips: list[JointSelectorChip] = []
+            self._on_link_selected = on_link_selected
+            self._joint_chips: list[SelectionChip] = []
+            self._link_chips: list[SelectionChip] = []
+            self._selected_joint_index: int | None = None
+            self._selected_link_index: int | None = None
+            self._last_snapshot: DemoSnapshot | None = None
             self.world_scale = max(1.0, float(self.arm.reach))
 
             layout = QtWidgets.QVBoxLayout(self)
@@ -761,22 +918,47 @@ if _QT_AVAILABLE:
             title_row_layout.addStretch(1)
             title_row_layout.addWidget(self.dof_badge, 0, QtCore.Qt.AlignmentFlag.AlignRight)
 
-            chip_row = QtWidgets.QWidget()
-            chip_row_layout = QtWidgets.QHBoxLayout(chip_row)
-            chip_row_layout.setContentsMargins(0, 0, 0, 0)
-            chip_row_layout.setSpacing(6)
-            chip_row_layout.addWidget(QtWidgets.QLabel("Joint origins:"))
+            chip_container = QtWidgets.QWidget()
+            chip_container_layout = QtWidgets.QVBoxLayout(chip_container)
+            chip_container_layout.setContentsMargins(0, 0, 0, 0)
+            chip_container_layout.setSpacing(6)
+
+            joint_row = QtWidgets.QWidget()
+            joint_row_layout = QtWidgets.QHBoxLayout(joint_row)
+            joint_row_layout.setContentsMargins(0, 0, 0, 0)
+            joint_row_layout.setSpacing(6)
+            joint_row_layout.addWidget(QtWidgets.QLabel("Joint origins:"))
             for joint_index, link in enumerate(self.arm.links, start=1):
-                chip = JointSelectorChip(joint_index, f"J{joint_index}")
+                chip = SelectionChip(joint_index, f"J{joint_index}")
                 chip.setObjectName("SimulationChip")
                 chip.setToolTip(self._format_joint_tooltip(joint_index, link))
                 chip.clicked.connect(self._on_joint_selected)
                 self._joint_chips.append(chip)
-                chip_row_layout.addWidget(chip)
-            chip_row_layout.addStretch(1)
+                joint_row_layout.addWidget(chip)
+            joint_row_layout.addStretch(1)
+
+            link_row = QtWidgets.QWidget()
+            link_row_layout = QtWidgets.QHBoxLayout(link_row)
+            link_row_layout.setContentsMargins(0, 0, 0, 0)
+            link_row_layout.setSpacing(6)
+            link_row_layout.addWidget(QtWidgets.QLabel("Link segments:"))
+            for segment_index, (label, endpoints) in enumerate(
+                zip(SIMULATION_LINK_SEGMENT_LABELS, SIMULATION_LINK_SEGMENT_ENDPOINTS, strict=True),
+                start=1,
+            ):
+                chip = SelectionChip(segment_index, label)
+                chip.setObjectName("SimulationChip")
+                chip.setToolTip(self._format_link_tooltip(label, endpoints))
+                chip.clicked.connect(self._on_link_selected)
+                self._link_chips.append(chip)
+                link_row_layout.addWidget(chip)
+            link_row_layout.addStretch(1)
+
+            chip_container_layout.addWidget(joint_row)
+            chip_container_layout.addWidget(link_row)
 
             header_layout.addWidget(title_row)
-            header_layout.addWidget(chip_row)
+            header_layout.addWidget(chip_container)
             layout.addWidget(header, 0)
 
             self.view = gl.GLViewWidget()
@@ -804,26 +986,82 @@ if _QT_AVAILABLE:
             self.view.addItem(self._y_axis)
             self.view.addItem(self._z_axis)
 
-            self._arm_line = gl.GLLinePlotItem(pos=np.zeros((2, 3), dtype=float), color=(1.0, 1.0, 1.0, 1.0), width=3, antialias=True, mode="line_strip")
+            self._link_radius = default_link_visual_radius(self.arm)
+            self._tool_link_radius = self._link_radius * 0.88
+            self._link_mesh = gl.MeshData.cylinder(rows=1, cols=24, radius=[1.0, 1.0], length=1.0, offset=False)
+            self._link_cylinders: list[gl.GLMeshItem] = []
+            for _ in range(self.arm.dof):
+                item = self._create_link_mesh_item(color=LINK_SEGMENT_DEFAULT_COLOR)
+                self._link_cylinders.append(item)
+                self.view.addItem(item)
+            self._tool_link = self._create_link_mesh_item(color=TOOL_SEGMENT_DEFAULT_COLOR)
+            self.view.addItem(self._tool_link)
+            self._segment_items = [*self._link_cylinders, self._tool_link]
+
             self._trace_line = gl.GLLinePlotItem(pos=np.zeros((2, 3), dtype=float), color=(0.3, 0.65, 1.0, 1.0), width=2, antialias=True, mode="line_strip")
-            self._joint_markers = gl.GLScatterPlotItem(pos=np.zeros((0, 3), dtype=float), color=(0.96, 0.8, 0.2, 1.0), size=11, pxMode=True)
+            self._joint_markers = gl.GLScatterPlotItem(pos=np.zeros((0, 3), dtype=float), color=JOINT_MARKER_DEFAULT_COLOR, size=11, pxMode=True)
+            self._tool_marker = gl.GLScatterPlotItem(pos=np.zeros((0, 3), dtype=float), color=TOOL_MARKER_DEFAULT_COLOR, size=12, pxMode=True)
             self._inactive_targets = gl.GLScatterPlotItem(pos=np.zeros((0, 3), dtype=float), color=(0.35, 0.55, 1.0, 1.0), size=8, pxMode=True)
             self._active_target = gl.GLScatterPlotItem(pos=np.zeros((0, 3), dtype=float), color=(1.0, 0.27, 0.23, 1.0), size=8, pxMode=True)
 
-            self.view.addItem(self._arm_line)
             self.view.addItem(self._trace_line)
             self.view.addItem(self._joint_markers)
+            self.view.addItem(self._tool_marker)
             self.view.addItem(self._inactive_targets)
             self.view.addItem(self._active_target)
             layout.addWidget(self.view, 1)
 
+            self._apply_selection_highlights()
+
         def set_selected_joint(self, joint_index: int | None) -> None:
+            self._selected_joint_index = int(joint_index) if joint_index is not None else None
+            self._apply_selection_highlights()
+
+        def set_selected_link(self, link_index: int | None) -> None:
+            self._selected_link_index = int(link_index) if link_index is not None else None
+            self._apply_selection_highlights()
+
+        def _set_chip_selected(self, chip: SelectionChip, selected: bool) -> None:
+            chip.setProperty("selected", selected)
+            chip.style().unpolish(chip)
+            chip.style().polish(chip)
+            chip.update()
+
+        def _apply_selection_highlights(self) -> None:
             for chip in self._joint_chips:
-                is_selected = joint_index is not None and chip.joint_index == int(joint_index)
-                chip.setProperty("selected", is_selected)
-                chip.style().unpolish(chip)
-                chip.style().polish(chip)
-                chip.update()
+                self._set_chip_selected(chip, self._selected_joint_index is not None and chip.selection_index == self._selected_joint_index)
+            for chip in self._link_chips:
+                self._set_chip_selected(chip, self._selected_link_index is not None and chip.selection_index == self._selected_link_index)
+
+            highlight = selection_highlight_state(self._selected_joint_index, self._selected_link_index)
+
+            segment_colors = [LINK_SEGMENT_DEFAULT_COLOR for _ in range(self.arm.dof)] + [TOOL_SEGMENT_DEFAULT_COLOR]
+            if highlight.link_segment_index is not None:
+                segment_colors[highlight.link_segment_index] = LINK_SEGMENT_HIGHLIGHT_COLOR
+            if highlight.joint_segment_index is not None:
+                segment_colors[highlight.joint_segment_index] = JOINT_MARKER_HIGHLIGHT_COLOR
+            for item, color in zip(self._segment_items, segment_colors, strict=True):
+                item.setColor(color)
+
+            if self._last_snapshot is None:
+                self.view.update()
+                return
+
+            arm_points = np.asarray(self._last_snapshot.arm_points, dtype=float)
+            tool_point = np.asarray(self._last_snapshot.tool_point, dtype=float)
+            joint_marker_colors = np.repeat(np.array([JOINT_MARKER_DEFAULT_COLOR], dtype=float), self.arm.dof, axis=0)
+            tool_marker_color = np.array(TOOL_MARKER_DEFAULT_COLOR, dtype=float)
+            if highlight.link_marker_index is not None:
+                if highlight.link_marker_index < self.arm.dof:
+                    joint_marker_colors[highlight.link_marker_index] = np.array(LINK_SEGMENT_HIGHLIGHT_COLOR, dtype=float)
+                else:
+                    tool_marker_color = np.array(LINK_SEGMENT_HIGHLIGHT_COLOR, dtype=float)
+            if highlight.joint_marker_index is not None:
+                joint_marker_colors[highlight.joint_marker_index] = np.array(JOINT_MARKER_HIGHLIGHT_COLOR, dtype=float)
+
+            self._joint_markers.setData(pos=arm_points[1:], color=joint_marker_colors, size=11, pxMode=True)
+            self._tool_marker.setData(pos=tool_point[None, :], color=tool_marker_color, size=12, pxMode=True)
+            self.view.update()
 
         def _create_xy_plane(self, size: float) -> gl.GLMeshItem:
             half = size / 2.0
@@ -848,10 +1086,53 @@ if _QT_AVAILABLE:
                 glOptions="translucent",
             )
 
+        def _create_link_mesh_item(self, color: tuple[float, float, float, float]) -> gl.GLMeshItem:
+            return gl.GLMeshItem(
+                meshdata=self._link_mesh,
+                color=color,
+                smooth=True,
+                shader="shaded",
+                drawFaces=True,
+                drawEdges=False,
+                glOptions="opaque",
+            )
+
+        def _segment_transform(self, start: np.ndarray, end: np.ndarray, radius: float) -> pg.Transform3D:
+            start = np.asarray(start, dtype=float)
+            end = np.asarray(end, dtype=float)
+            delta = end - start
+            length = float(np.linalg.norm(delta))
+
+            transform = pg.Transform3D()
+            transform.translate(float(start[0]), float(start[1]), float(start[2]))
+            if length < 1e-9:
+                transform.scale(0.0, 0.0, 0.0)
+                return transform
+
+            direction = delta / length
+            z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
+            axis = np.cross(z_axis, direction)
+            axis_norm = float(np.linalg.norm(axis))
+            dot = float(np.clip(np.dot(z_axis, direction), -1.0, 1.0))
+            if axis_norm < 1e-9:
+                axis = np.array([1.0, 0.0, 0.0], dtype=float)
+                angle_deg = 0.0 if dot >= 0.0 else 180.0
+            else:
+                axis /= axis_norm
+                angle_deg = math.degrees(math.atan2(axis_norm, dot))
+
+            transform.rotate(angle_deg, float(axis[0]), float(axis[1]), float(axis[2]))
+            transform.scale(radius, radius, length)
+            return transform
+
         def update_snapshot(self, snapshot: DemoSnapshot) -> None:
-            self._arm_line.setData(pos=np.asarray(snapshot.arm_points, dtype=float), color=(1.0, 1.0, 1.0, 1.0), width=3, antialias=True, mode="line_strip")
+            self._last_snapshot = snapshot
+            arm_points = np.asarray(snapshot.arm_points, dtype=float)
+            tool_point = np.asarray(snapshot.tool_point, dtype=float)
+            for item, start, end in zip(self._link_cylinders, arm_points[:-1], arm_points[1:], strict=True):
+                item.setTransform(self._segment_transform(start, end, self._link_radius))
+            self._tool_link.setTransform(self._segment_transform(arm_points[-1], tool_point, self._tool_link_radius))
             self._trace_line.setData(pos=np.asarray(snapshot.trace_points, dtype=float), color=(0.3, 0.65, 1.0, 1.0), width=2, antialias=True, mode="line_strip")
-            self._joint_markers.setData(pos=np.asarray(snapshot.arm_points[1:], dtype=float), color=(0.96, 0.8, 0.2, 1.0), size=11, pxMode=True)
 
             inactive = np.asarray(snapshot.inactive_targets, dtype=float) if snapshot.inactive_targets is not None else np.zeros((0, 3), dtype=float)
             self._inactive_targets.setData(pos=inactive, color=(0.35, 0.55, 1.0, 1.0), size=8, pxMode=True)
@@ -863,7 +1144,7 @@ if _QT_AVAILABLE:
             else:
                 self._active_target.setVisible(False)
 
-            self.view.update()
+            self._apply_selection_highlights()
 
         def _format_joint_tooltip(self, joint_index: int, link: DHLink) -> str:
             theta_offset_deg = math.degrees(link.theta_offset)
@@ -874,12 +1155,16 @@ if _QT_AVAILABLE:
                 f"d = {link.d:.3f} m, θ = {theta_text}"
             )
 
+        def _format_link_tooltip(self, label: str, endpoints: tuple[str, str]) -> str:
+            return f"{label} segment\n{endpoints[0]} to {endpoints[1]}"
+
 
     class DashboardWindow(QtWidgets.QMainWindow):
         def __init__(self, session: BaseDemoSession) -> None:
             super().__init__()
             self.session = session
             self.selected_joint_index: int | None = None
+            self.selected_link_index: int | None = None
             joint_getters: tuple[Callable[[DemoSnapshot], np.ndarray], ...] = (
                 lambda snapshot: snapshot.joint_positions,
                 lambda snapshot: snapshot.joint_velocities,
@@ -902,7 +1187,7 @@ if _QT_AVAILABLE:
                     strict=True,
                 )
             ]
-            self.sim_card = SimulationCard(self.session.arm, self._set_selected_joint)
+            self.sim_card = SimulationCard(self.session.arm, self._set_selected_joint, self._set_selected_link)
 
             self.setWindowTitle(session.mode_title)
             self.setMinimumSize(1400, 900)
@@ -930,6 +1215,7 @@ if _QT_AVAILABLE:
 
             self._apply_window_style()
             self._set_selected_joint(None)
+            self._set_selected_link(None)
             initial_snapshot = self.session.snapshot()
             self.sim_card.update_snapshot(initial_snapshot)
             self._ingest_snapshot(initial_snapshot)
@@ -1015,6 +1301,16 @@ if _QT_AVAILABLE:
             self.sim_card.set_selected_joint(self.selected_joint_index)
             for card in self.metric_cards:
                 card.set_selected_joint(self.selected_joint_index)
+
+        def _set_selected_link(self, link_index: int | None) -> None:
+            if link_index is None:
+                next_selection: int | None = None
+            elif self.selected_link_index == link_index:
+                next_selection = None
+            else:
+                next_selection = int(link_index)
+            self.selected_link_index = next_selection
+            self.sim_card.set_selected_link(self.selected_link_index)
 
         def _ingest_snapshot(self, snapshot: DemoSnapshot) -> None:
             for card in self.metric_cards:

@@ -54,12 +54,12 @@ def geometric_jacobian(arm: Arm7DOFDH, q: Sequence[float]) -> np.ndarray:
     ----------
     arm : Arm7DOFDH
         Arm model providing DH parameters.
-    q : array_like, shape (4,)
+    q : array_like, shape (7,)
         Joint angles.
 
     Returns
     -------
-    J : (6, 4) ndarray
+    J : (6, 7) ndarray
         Geometric Jacobian mapping joint velocities to end-effector spatial
         velocity [v; w].
     """
@@ -84,7 +84,7 @@ def geometric_jacobian(arm: Arm7DOFDH, q: Sequence[float]) -> np.ndarray:
 
 def position_jacobian(arm: Arm7DOFDH, q: Sequence[float]) -> np.ndarray:
     """
-    Return the 3x4 position Jacobian J_v(q) in the base frame.
+    Return the 3x7 position Jacobian J_v(q) in the base frame.
 
     J_v is the primary Topic 4 block used by position-control and inverse
     differential-kinematics logic.
